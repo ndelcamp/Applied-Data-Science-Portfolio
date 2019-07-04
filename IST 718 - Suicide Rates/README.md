@@ -6,5 +6,5 @@ Files in this folder:
   - Final_Presentiation.pptx - Presentation of methods and findings. Review with Microsoft PowerPoint.
   - EDA.ipynb - Python Jupyter Notebook that combines data sources and provides an exploratory data analysis. Review in GitHub.
   - kmeans.ipynb - Python Jupyter Notebook that creates K-Means clusters two ways; using the two most influential factors in suicide rates: Age and Sex, and a search for other influential factors. Review in GitHub.
-  - Machine_Learning.ipynb - Python Jupyter Notebook that models suicide rates using *********. Review in GitHub.
+  - Machine_Learning.ipynb - Python Jupyter Notebook that models suicide rates using Random Forest models. Review in GitHub.
   - master_dataset.csv - Dataset containing merged source data. These are the data used in the analyses.
