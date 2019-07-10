@@ -1,0 +1,606 @@
+---
+title: "MAR 653 Final Project"
+author: "Alex Balter, Nash Delcamp, and Rayden Soriano"
+output:
+  html_document:
+    df_print: paged
+  word_document: default
+editor_options:
+  chunk_output_type: console
+---
+
+<!-- K means clustering: What different types of students do we have? (With a focus on alcohol consumption -->
+
+<!-- Linear Regression: Can we predict continuous values, such as number of school absences based on variables associated with each student?  Or predict final grade based on alcohol consumption and other lifestyle decisions? -->
+
+<!-- Logistic Regression: What is the probability the student is prone to be an alcoholic? -->
+<!-- Alcoholism will have to be made into a binary variable based on assessment of weekday and weekend drinks. -->
+
+<!-- Potentially also predict level of drinking although the variable is on a 1-5 scale. So maybe Ordinal Logit more applicable. -->
+
+<!-- Descriptive Statistics: What are the differences between students in the math class and students in the Portuguese class?  How does alcohol consumption affect school performance? -->
+
+```{r}
+#Rayden, if you don't have any of the packages here, install them below by deleting the comments (#) before the install
+#Then recomment them
+#The random forest will take a minute or so to run, so keep that in mind if you run the whole notebook at once
+
+#install.packages('dplyr')
+#install.packages('ggplot2')
+#install.packages('caret')
+#install.packages('MASS')
+#install.packages('knitr')
+#install.packages('tidyr')
+#install.packages('reshape2')
+#install.packages('ggcorrplot')
+
+```
+
+
+
+### Load and Merge Data
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+library(dplyr)
+library(ggplot2)
+
+#Use this function to get indexes because column numbers can change so frequently
+named <- function(names, dataset){
+  unname(sapply(names, function(x) {which(colnames(dataset) == x)}))
+}
+
+mat <- read.table("C:/Users/delc7/OneDrive/Documents/Syracuse/MAR 653/Final Project/student-alcohol-consumption/student-mat.csv", 
+                  sep = ",", header = TRUE)
+mat$mat <- 1
+
+por <- read.table("C:/Users/delc7/OneDrive/Documents/Syracuse/MAR 653/Final Project/student-alcohol-consumption/student-por.csv", 
+                  sep = ",", header = TRUE)
+por$por <- 1
+
+#All variables that should be consistent for a student. (non-course specific attributes)
+identifierSet <- c('school', 'sex', 'age', 'address', 'famsize', 'Pstatus', 'Medu', 'Fedu', 'Mjob', 'Fjob', 'reason',
+                   'guardian', 'traveltime', 'studytime', 'failures', 'schoolsup', 'famsup', 'activities', 'nursery',
+                   'higher', 'internet', 'romantic', 'famrel', 'freetime', 'goout', 'Dalc', 'Walc', 'health', 'absences')
+
+#Are any students 'exactly alike'? (All non-course specific attributes are identical)
+nrow(unique(mat)) == nrow(unique(mat[, identifierSet])) #mat has no students 'exatly alike'
+nrow(unique(por)) == nrow(unique(por[, identifierSet])) #por has no students 'exatly alike'
+
+#Therefore, our mergedInner dataset contains only students in both courses
+mergedInner <- merge(mat, por, by = identifierSet)
+colnames(mergedInner)[named(c('paid.x', 'G1.x', 'G2.x', 'G3.x', 'paid.y', 'G1.y', 'G2.y', 'G3.y'), mergedInner)] <- 
+  c('paid.mat', 'G1.mat', 'G2.mat', 'G3.mat', 'paid.por', 'G1.por', 'G2.por', 'G3.por')
+
+#Are the students in both classes the only observations in both datasets that are 'exactly alike'?
+merged <- merge(mat, por, by = identifierSet, all = TRUE)
+nrow(mergedInner) == nrow(mat) + nrow(por) - nrow(merged)
+#Yes, therefore the full outer merge does not duplicate any students
+
+#Change NAs in mat and por variables to 0
+merged$mat <- ifelse(is.na(merged$mat), 0, merged$mat)
+merged$por <- ifelse(is.na(merged$por), 0, merged$por)
+
+#Change '.x' and '.y' variables to '.mat' and '.por'
+colnames(merged)[named(c('paid.x', 'G1.x', 'G2.x', 'G3.x', 'paid.y', 'G1.y', 'G2.y', 'G3.y'), merged)] <- 
+  c('paid.mat', 'G1.mat', 'G2.mat', 'G3.mat', 'paid.por', 'G1.por', 'G2.por', 'G3.por')
+
+#Average mat and por scores (if available)
+merged$G1.final <- ifelse(is.na(merged$G1.mat), merged$G1.por,
+                          ifelse(is.na(merged$G1.por), merged$G1.mat,
+                                 (merged$G1.mat + merged$G1.por) / 2))
+
+merged$G2.final <- ifelse(is.na(merged$G2.mat), merged$G2.por,
+                          ifelse(is.na(merged$G2.por), merged$G2.mat,
+                                 (merged$G2.mat + merged$G2.por) / 2))
+
+merged$G3.final <- ifelse(is.na(merged$G3.mat), merged$G3.por,
+                          ifelse(is.na(merged$G3.por), merged$G3.mat,
+                                 (merged$G3.mat + merged$G3.por) / 2))
+
+#make a column that is 'yes' if student paid for all classes in, 'no' otherwise
+merged$paid.all <- ifelse(xor(is.na(merged$paid.mat), is.na(merged$paid.por)),
+                         ifelse(is.na(merged$paid.mat), as.character(merged$paid.por), as.character(merged$paid.mat)),
+                         ifelse(as.character(merged$paid.mat) == 'yes' & as.character(merged$paid.por) == 'yes', 'yes', 'no'))
+
+merged$paid.all <- as.factor(merged$paid.all)
+
+#Talc is the ceiling of the mean of Dalc and Walc
+merged$Talc <- ceiling((merged$Dalc + merged$Walc) / 2)
+
+#Save this instance of merged in case we want it for something else
+mergedOrig <- merged
+
+#Only keep averaged grades
+merged <- merged[, -named(c('G1.mat', 'G2.mat', 'G3.mat', 'G1.por', 'G2.por', 'G3.por'), merged)]
+
+#Only keep paid.all for paids
+merged <- merged[, -named(c('paid.mat', 'paid.por'), merged)]
+
+#Only keep Talc for alcohol consumption
+merged <- merged[, -named(c('Dalc', 'Walc'), merged)]
+
+#Now we have no NAs without removing any data
+sum(is.na(merged)) == 0
+
+
+merged$absences <- ifelse(merged$absences %in% c(0:9), '0-9', 
+                          ifelse(merged$absences %in% c(10:19), '10-19',
+                                 ifelse(merged$absences %in% c(20:29), '20-29',
+                                        ifelse(merged$absences %in% c(30:39), '30-39',
+                                               ifelse(merged$absences %in% c(40:49), '40-49',
+                                                      ifelse(merged$absences %in% c(50:59), '50-59', '60-75'))))))
+
+merged$absences <- factor(merged$absences, levels = c('0-9', '10-19', '20-29', '30-39', '40-49', '50-59', '60-75'), ordered = TRUE)
+
+merged$G1.final <- ifelse(merged$G1.final %in% c(0:5), '0-5',
+                          ifelse(merged$G1.final %in% c(6:10), '6-10',
+                                 ifelse(merged$G1.final %in% c(11:15), '11-15', '16-20')))
+
+merged$G2.final <- ifelse(merged$G2.final %in% c(0:5), '0-5',
+                          ifelse(merged$G2.final %in% c(6:10), '6-10',
+                                 ifelse(merged$G2.final %in% c(11:15), '11-15', '16-20')))
+
+merged$G3.final <- ifelse(merged$G3.final %in% c(0:5), '0-5',
+                          ifelse(merged$G3.final %in% c(6:10), '6-10',
+                                 ifelse(merged$G3.final %in% c(11:15), '11-15', '16-20')))
+
+merged$G1.final <- factor(merged$G1.final, levels = c('0-5', '6-10', '11-15', '16-20'), ordered = TRUE)
+merged$G2.final <- factor(merged$G2.final, levels = c('0-5', '6-10', '11-15', '16-20'), ordered = TRUE)
+merged$G3.final <- factor(merged$G3.final, levels = c('0-5', '6-10', '11-15', '16-20'), ordered = TRUE)
+
+```
+
+
+### Summary Statistics
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+library(knitr)
+kable(summary(mergedOrig))
+
+library(tidyr)
+workday_weekend_alc <- mergedOrig[, c('mat','por','Dalc', 'Walc')]
+names(workday_weekend_alc) <- c('Math Class', 'Portugese Class','Workday Alcohol Consumption', 'Weekend Alcohol Consumption')
+workday_weekend_alc <- gather(workday_weekend_alc, Alcohol, Value, -c(1,2))
+#names(workday_weekend_alc) <- c('Alcohol', 'Value')
+
+#Overall Alcohol Consumption
+
+ggplot(workday_weekend_alc, aes(x = Value, fill = Alcohol))+geom_bar(position = 'dodge')+
+  ggtitle('Overall Student Alcohol Consumption - 1 = Low, 5 = High')+
+  theme(plot.title = element_text(hjust = 0.5))+
+  xlab('Alcohol Consumption')
+
+### There was no difference here
+# # Math class
+# math_class <- subset(workday_weekend_alc, subset = `Math Class` == 1)
+# 
+# ggplot(math_class, aes(x = Value, fill = Alcohol))+geom_bar(position = 'dodge')+
+#   ggtitle('Math Class Alcohol Consumption - 1 = Low, 5 = High')+
+#   theme(plot.title = element_text(hjust = 0.5))+
+#   xlab('Alcohol Consumption')
+# 
+# # Portugese Class
+# port_class <- subset(workday_weekend_alc, subset = `Portugese Class` == 1)
+# 
+# ggplot(port_class, aes(x = Value, fill = Alcohol))+geom_bar(position = 'dodge')+
+#   ggtitle('Portugese Class Alcohol Consumption - 1 = Low, 5 = High')+
+#   theme(plot.title = element_text(hjust = 0.5))+
+#   xlab('Alcohol Consumption')
+
+
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+# By Sex
+sex <- mergedOrig[, c('sex', 'Talc')]
+sex$Sex <- ifelse(sex$sex == 'M', 'Male', 'Female')
+sex <- sex %>% group_by(Sex, Talc) %>% summarise(Count = n()) %>%
+  ungroup() %>% group_by(Sex) %>% mutate(Pct = Count*100/sum(Count))
+ggplot(sex, aes(x = Talc, y = Pct, fill = Sex))+geom_bar(stat = 'identity',position = 'dodge')+
+  ggtitle('Average Alcohol Consumption by Sex')+
+  theme(plot.title = element_text(hjust = 0.5))+
+  xlab('Average Alcohol Consumption')+
+  ylab('Percent')
+
+# By Address
+address <- mergedOrig[, c('address', 'Talc')]
+address$Address <- ifelse(address$address == 'U', 'Urban', 'Rural')
+address <- address %>% group_by(Address, Talc) %>% summarise(Count = n()) %>%
+  ungroup() %>% group_by(Address) %>% mutate(Pct = Count*100/sum(Count))
+ggplot(address, aes(x = Talc, y = Pct, fill = Address))+geom_bar(stat = 'identity',position = 'dodge')+
+  ggtitle('Average Alcohol Consumption by Address')+
+  theme(plot.title = element_text(hjust = 0.5))+
+  xlab('Average Alcohol Consumption')+
+  ylab('Percent')
+
+# By Pstatus
+pstatus <- mergedOrig[, c('Pstatus', 'Talc')]
+pstatus$Parents <- ifelse(pstatus$Pstatus == 'T', 'Live Together', 'Live Apart')
+pstatus <- pstatus %>% group_by(Parents, Talc) %>% summarise(Count = n()) %>%
+  ungroup() %>% group_by(Parents) %>% mutate(Pct = Count*100/sum(Count))
+
+ggplot(pstatus, aes(x = Talc, y = Pct, fill = Parents))+geom_bar(stat = 'identity',position = 'dodge')+
+  ggtitle('Average Alcohol Consumption by Parental Cohabitation')+
+  theme(plot.title = element_text(hjust = 0.5))+
+  xlab('Average Alcohol Consumption')+
+  ylab('Percent')
+
+# By Age
+
+age <- mergedOrig[, c('age', 'Talc')]
+age$Talc <-  as.factor(age$Talc)
+age_sum <- as.data.frame(age %>% group_by(Talc) %>% summarise(Average_Age = round(mean(age), 2)))
+names(age_sum)[1] <- 'Average Consumption'
+age_sum
+
+# Correlation
+numeric_stuff <- mergedOrig[,sapply(mergedOrig, is.numeric)]
+names(numeric_stuff)
+numeric_stuff <- numeric_stuff[, c(1:9, 12, 13, 25)]
+
+corr_mat <- round(cor(numeric_stuff), 2)
+if(!require(ggcorrplot)){
+  install.packages('ggcorrplot')
+}
+library(ggcorrplot)
+ggcorrplot(corr_mat, hc.order = TRUE, 
+           type = "lower", 
+           lab = TRUE, 
+           lab_size = 3, 
+           method="circle", 
+           colors = c("tomato2", "white", "springgreen3"), 
+           title="Correlogram of Alcohol Consumption", 
+           ggtheme=theme_bw)
+
+# Go out
+go_out <- mergedOrig[, c('goout', 'Talc')]
+go_out_sum <- as.data.frame(go_out %>% group_by(Talc) %>% summarise(Go_Out = round(mean(goout),2)))
+names(go_out_sum) <- c('Alcohol Consumption', 'Go Out with Friends')
+go_out_sum
+```
+
+
+### K means clustering
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#Function to make an elbow plot.
+getElbow <- function(set, name = NULL, vars = NULL){
+  if(is.null(name)) name <- 'Elbow Plot'
+  else name <- paste0('Elbow Plot - ', name)
+  
+  if(is.null(vars)) vars <- colnames(set)
+  set.seed(90210)
+  ks <- 2:10
+  setN <- data.frame(sapply(set[, vars], as.numeric))
+  setResults <- data.frame(K = ks, Ratio = ks)
+  
+  for(k in ks){
+    k_means <- kmeans(setN, k)
+    result <- data.frame(K = k, Ratio = sum(k_means$withinss)/k_means$betweenss)
+    setResults[k - 1,] <- result
+  }
+  
+  elbow <- ggplot(setResults, aes(x = K, y = Ratio)) + geom_point(size = 3) + geom_line() + 
+    ggtitle(name) +
+    theme(plot.title = element_text(hjust = 0.5)) +
+    ylab('Ratio of Within Cluster to Between Cluster Variance')
+  
+  return(elbow)
+}
+
+#Need to change Talc in the function if we want to look at something else
+#Function to get the final clusters.
+finalClust <- function(set, k, vars = NULL){
+  if(is.null(vars)) vars <- colnames(set)
+  
+  setN <- data.frame(sapply(set[, vars], as.numeric))
+  K <- k
+  
+  k_means_final <- kmeans(setN, K)
+  set$Cluster <- k_means_final$cluster
+  
+  summary <- set %>% group_by(Cluster, Talc) %>% summarise(Count = n())
+  
+  summary$Talc_Center <- round(k_means_final$centers[summary$Cluster, ncol(setN)], 2)
+  
+  return(list(set, summary, k_means_final, set))
+}
+
+#Function to group clusters
+groupAndSum <- function(x, clustered){
+  current <- clustered[clustered$Cluster == x,]
+  current$Cumulative <- cumsum(current$Count)
+  current$ratioCluster <- round(current$Count / current$Cumulative[nrow(current)], 2)
+  current$ratioTotal <- round(current$Count / nrow(merged), 2)
+  current
+}
+
+#Print final clusters with a one liner
+printClusters <- function(data, k, vars = NULL){
+  finalClusters <- finalClust(data, k, vars)
+  clustersPrint <- lapply(unique(finalClusters[[2]]$Cluster), groupAndSum, clustered = finalClusters[[2]])
+  return(list(kable(clustersPrint), finalClusters[[3]], finalClusters[[4]]))
+}
+```
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#get elbow plot for all variables
+getElbow(merged, paste0(quote(merged), ' (all variables)'))
+
+```
+
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+k_means_all <- printClusters(merged, 4)
+k_means_all[[1]]
+#kable(round(k_means_all[[2]]$centers, 2))
+
+```
+
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+set.seed(4325)
+vars <- c('sex', 'address', 'famsize', 'Pstatus', 'studytime', 'romantic', 'G1.final', 'G2.final', 'G3.final', 'Talc')
+getElbow(merged, paste0(quote(merged), ' (reduced variables)'), vars)
+
+
+k_means_final <- printClusters(merged, 4, vars)
+k_means_final[[1]]
+round(k_means_final[[2]]$centers, 2)
+
+#I like this for a final cluster. Very strong separation and great size in each cluster.
+final <- k_means_final[[3]]
+finalOrig <- mergedOrig
+finalOrig$Cluster <- k_means_final[[3]]$Cluster
+```
+
+
+### Correlation Matrix
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+finalOrig$G.final <- (finalOrig$G1.final + finalOrig$G2.final + finalOrig$G3.final) / 3
+
+library(reshape2)
+
+corr <- cor(data.frame(sapply(finalOrig[, apply(finalOrig, 2, function(x) sum(is.na(x)) == 0)], as.numeric)))
+meltCorr <- melt(corr)
+
+ggplot(meltCorr, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = c('red', 'blue', 'white', 'blue', 'red'), limits = c(-1, 1)) +
+  coord_equal() +
+  labs(x = "",y = "",fill = "Corr") +
+  theme(axis.text.x = element_text(angle=90, vjust=.5, hjust=1),
+        panel.grid.major=element_blank()) + ggtitle('Correlation Matrix', subtitle = 'All Variables')
+
+#Remove highly correlated variables
+#Cut off at |cor| > .5
+removelm <- c('G1.final', 'G2.final', 'G3.final', 'Walc', 'Dalc', 'Medu', 'mat', 'Cluster')
+
+corr <- data.frame(corr)
+corr <- corr[, -named(removelm, corr)]
+corr <- corr[rownames(corr) %in% removelm == FALSE,]
+meltCorr <- melt(as.matrix(corr))
+
+ggplot(meltCorr, aes(Var1, Var2, fill = value)) +
+  geom_tile() +
+  scale_fill_gradientn(colours = c('red', 'blue', 'white', 'blue', 'red'), limits = c(-1, 1)) +
+  coord_equal() +
+  labs(x = "",y = "",fill = "Corr") +
+  theme(axis.text.x = element_text(angle=90, vjust=.5, hjust=1),
+        panel.grid.major=element_blank()) + ggtitle('Correlation Matrix', subtitle = 'Stongly Correlated Variables Removed')
+
+```
+
+
+### Linear Model to Predict Final Grade
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+#Let's try to predict Final grade
+
+######Put all variables back in and restart
+
+lmvars <- c('school', 'famsize', 'Fedu', 'studytime', 'failures', 'schoolsup', 'famsup', 'higher', 'health', 'paid.all', 'Talc', 'G.final')
+
+library(caret)
+set.seed(3523)
+parts <- createDataPartition(finalOrig$G.final, p = 0.8)
+
+train.control <- trainControl(method = "cv", number = 10)
+
+modellm <- train(G.final ~ ., data = finalOrig[parts[[1]], lmvars], method = "lm", trControl = train.control)
+
+print(modellm)
+summary(modellm)
+lmImp <- varImp(modellm)[[1]]
+lmImp$Variable <- row.names(lmImp)
+lmImp <- lmImp[order(lmImp$Overall, decreasing = TRUE), ]
+lmImp <- data.frame('Variable' = lmImp$Variable, 'Overall' = round(lmImp$Overall, 2))
+kable(lmImp, row.names = FALSE)
+
+predlm = predict.train(modellm, finalOrig[-parts[[1]], ])
+predictedlm <- data.frame('Observed' = finalOrig$G.final[-parts[[1]]], 'Predicted' = predlm)
+ggplot(data = predictedlm, aes(x = Predicted, y = Observed)) + geom_point() + theme_classic() + 
+  ggtitle('Observed vs. Predicted\nLinear Regression') + xlim(c(0, 20)) + ylim(c(0, 20))
+
+summary(modellm)
+cat('RMSE of test data: ', round(sqrt(mean((predictedlm$Predicted - predictedlm$Observed)^2)), 2), '\n')
+cat('SSE of test data: ', round(sum((predictedlm$Predicted - predictedlm$Observed)^2), 2), '\n')
+
+```
+
+
+### Random Forest to Predict Final Grade
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# rfvars <- c('school', 'sex', 'age', 'address', 'famsize', 'Medu', 'Fedu', 'Mjob', 'Fjob', 'reason', 'guardian', 'traveltime', 'studytime', 'failures', 'schoolsup', 'famsup', 'activities', 'nursery', 'higher', 'internet', 'romantic', 'famrel', 'freetime', 'goout', 'health', 'absences', 'por', 'paid.all', 'Talc', 'G.final')
+# 
+# set.seed(3523)
+# #Create partitions again so we have the same number of random runs from seed set
+# parts <- createDataPartition(finalOrig$G.final, p = 0.8)
+# modelrf <- train(G.final ~ ., data = finalOrig[parts[[1]], rfvars], method = 'rf', trControl = train.control)
+# 
+# print(modelrf)
+# summary(modelrf)
+# rfImp <- varImp(object = modelrf, useModel = FALSE)[[1]]
+# rfImp$Variable <- row.names(rfImp)
+# rfImp <- rfImp[order(rfImp$Overall, decreasing = TRUE), ]
+# rfImp <- data.frame('Variable' = rfImp$Variable, 'Overall' = round(rfImp$Overall, 2))
+# kable(rfImp, row.names = FALSE)
+# 
+# predrf = predict.train(modelrf, finalOrig[-parts[[1]], ])
+# predictedrf <- data.frame('Observed' = finalOrig$G.final[-parts[[1]]], 'Predicted' = predrf)
+# ggplot(data = predictedrf, aes(x = Predicted, y = Observed)) + geom_point() + theme_classic() + ggtitle('Observed vs. Predicted\nRandom Forest') +
+#   xlim(c(0, 20)) + ylim(c(0, 20))
+# 
+# cat('RMSE of test data: ', round(sqrt(mean((predictedrf$Predicted - predictedrf$Observed)^2)), 2))
+# cat('\nSSE of test data: ', round(sum((predictedrf$Predicted - predictedrf$Observed)^2), 2))
+
+```
+
+
+### Logistic Regression
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+# Define Alcoholic
+# Talc >= 4
+
+logit_df <- mergedOrig
+logit_df$Alcoholic <- ifelse(logit_df$Talc >= 4, 1, 0)
+table(logit_df$Alcoholic)
+
+# Define Variables that make sense
+
+logit_vars <- c("school","sex","age","address","famsize",  "Pstatus", "Medu", "Fedu", "Mjob", "Fjob", "reason", "guardian", "traveltime",
+                "studytime",  "failures", "schoolsup",  "famsup", "activities", "nursery", "higher", "internet",   "romantic",   "famrel", 
+                "freetime",  "goout", "health", "absences", "paid.all", "G1.final", "G2.final", 'G3.final', "Alcoholic")
+logit_df <- logit_df[, logit_vars]
+
+# Create Training and Testing
+set.seed(90210)
+trainIndex <- createDataPartition(logit_df$Alcoholic, p = 0.8)$Resample1
+logit_train <- logit_df[trainIndex,]
+logit_test <- logit_df[-trainIndex,]
+
+logit_train_upsample <- logit_train
+logit_train_upsample$Alcoholic <- as.factor(logit_train_upsample$Alcoholic)
+logit_train_upsample <- upSample(logit_train_upsample[, -ncol(logit_train_upsample)],
+                                 logit_train_upsample$Alcoholic)
+names(logit_train_upsample)[ncol(logit_train_upsample)] <- 'Alcoholic'
+# Make initial model
+logit_mod <- glm(Alcoholic ~ ., data = logit_train_upsample, family = 'binomial')
+summary(logit_mod)
+
+# Initial Predictions
+first_preds <- predict(logit_mod, newdata = logit_test, type = 'response')
+logit_df_new <- data.frame(Alcoholic = logit_test$Alcoholic, Predicted_Prob = first_preds)
+logit_df_new$Alcoholic <- as.factor(logit_df_new$Alcoholic)
+ggplot(logit_df_new, aes(x = Alcoholic, y = Predicted_Prob))+geom_boxplot()
+
+first_preds <- ifelse(first_preds >= 0.50, 1, 0)
+
+table(Predicted = first_preds, Actual = logit_test$Alcoholic)
+
+# Remove Insignificant variables
+sig_vars <- c('sex', 'age', 'address', 'famsize', 'Pstatus', 'Fedu', 'Mjob', 'Fjob', 'reason', 'guardian', 'traveltime', 'studytime', 'nursery',
+              'higher', 'romantic', "famrel", 'freetime', 'goout', 'health', 'paid.all', 'G1.final', 'G3.final', 'Alcoholic')
+
+logit_train_sig <- logit_train_upsample[, sig_vars]
+logit_test_sig <- logit_test[, sig_vars]
+
+# Try again
+logit_mod_sig <- glm(Alcoholic ~ ., data = logit_train_sig, family = 'binomial')
+summary(logit_mod_sig)
+
+# Predictions
+sig_preds <- predict(logit_mod_sig, newdata = logit_test_sig, type = 'response')
+logit_df_new <- data.frame(Alcoholic = logit_test$Alcoholic, Predicted_Prob = sig_preds)
+logit_df_new$Alcoholic <- as.factor(logit_df_new$Alcoholic)
+ggplot(logit_df_new, aes(x = Alcoholic, y = Predicted_Prob))+geom_boxplot()
+sig_preds <- ifelse(sig_preds >= 0.47, 1, 0)
+
+
+table(Predicted = sig_preds, Actual = logit_test_sig$Alcoholic)
+```
+
+
+
+```{r}
+#Check out false positives and clusters
+kable(round(prop.table(table(sig_preds, finalOrig[-trainIndex, 'Cluster']), margin = 2), 2))
+```
+
+
+
+
+### Ordinal Logistic Regression
+
+```{r echo=FALSE, message=FALSE, warning=FALSE}
+
+ord_logit_df <- mergedOrig
+ord_logit_df$Talc <- factor(ord_logit_df$Talc, levels = 1:5, ordered = T)
+ord_logit_vars <- c("school","sex","age","address","famsize", "Pstatus",    "Medu",       "Fedu",       "Mjob",       "Fjob", 
+                    "reason", "guardian", "traveltime", "studytime",  "failures",  "schoolsup",  "famsup",     "activities", 
+                    "nursery",    "higher",   "internet",   "romantic",   "famrel",    "freetime",  "goout", "health", "absences", 
+                    "paid.all", "G1.final", "G2.final", 'G3.final', "Talc")
+
+ord_logit_df <- ord_logit_df[, ord_logit_vars]
+
+# Same training and testing
+ord_logit_train <- ord_logit_df[trainIndex,]
+ord_logit_test <- ord_logit_df[-trainIndex,]
+
+ord_logit_train_upsample <- ord_logit_train
+ord_logit_train_upsample <- upSample(ord_logit_train[, -ncol(ord_logit_train_upsample)],
+                                     ord_logit_train$Talc)
+names(ord_logit_train_upsample)[ncol(ord_logit_train_upsample)] <- 'Talc'
+table(ord_logit_train_upsample$Talc)
+library(MASS)
+
+# Initial model
+ord_mod_1 <- polr(Talc ~ ., data = ord_logit_train_upsample)
+
+summary(ord_mod_1)
+
+ord_preds_1 <- predict(ord_mod_1, newdata = ord_logit_test)
+
+table(Predicted = ord_preds_1, Actual = ord_logit_test$Talc)
+
+table(Predicted = ifelse(as.integer(as.character(ord_preds_1)) >= 4, 1, 0),
+      Actual = ifelse(as.integer(as.character(ord_logit_test$Talc)) >= 4, 1, 0))
+# Select "significant variables"
+ord_sig_vars <- c('sex', 'age', 'famsize', 'Fedu', 'Mjob', 'Fjob', 'reason', 'guardian', 'traveltime', 'studytime', 'failures', 
+                  'famsup', 'nursery', 'internet', 'romantic', 'famrel', 'freetime', 'goout', 'health', 'absences', 
+                  'paid.all', 'G1.final', 'Talc')
+
+ord_mod_2 <- polr(Talc ~ ., data = ord_logit_train_upsample[, ord_sig_vars])
+
+summary(ord_mod_2)
+
+ord_preds_2 <- predict(ord_mod_2, newdata = ord_logit_test)
+
+table(Predicted = ord_preds_2, Actual = ord_logit_test$Talc)
+table(Predicted = ifelse(as.integer(as.character(ord_preds_2)) >= 4, 1, 0),
+      Actual = ifelse(as.integer(as.character(ord_logit_test$Talc)) >= 4, 1, 0))
+
+ord_preds_3 <- ifelse(as.integer(as.character(ord_preds_2)) >= 4, 1, 0)
+
+```
+
+
+```{r}
+#Check out false positives and clusters
+
+kable(round(prop.table(table(ord_preds_3, finalOrig[-trainIndex, 'Cluster']), margin = 2), 2))
+```
+
+
+
+
