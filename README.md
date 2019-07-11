@@ -10,5 +10,5 @@ Files in this folder:
   - MAR 653 - Student Alcohol Consumption: Folder containing student alcohol consumption project
   - Final_Paper.docx: Final paper fulfilling the portfolio requirement
   - Final_Slides.pptx: Final slides fulfilling the portfolio requirement
-  - Recorded_Presentation.mp4: Recorded final slides fulfilling the portfolio requirement
+  - Recorded_Presentation.mp4: Access here: https://drive.google.com/file/d/1E5hkajxeXGjUTc0nT-HHwsP6R5l-vjTQ/view?usp=sharing
   - Nash_Delcamp_Resume.docx: Resume
